@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111111"><title>The Village Guest List — Door</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+<main class="wrap"><section class="card">
+  <header><h1>The Village Guest List</h1><div class="sub" id="doorSub">Live RSVP + door check-in.</div><div class="event-meta" id="doorMeta"></div></header>
+
+  <div id="loginBox" class="login">
+    <div class="notice">Staff sign-in</div>
+    <div><label>Email</label><input id="loginEmail" type="email" autocomplete="username" placeholder="Email"></div>
+    <div><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password" placeholder="Password"></div>
+    <div id="loginMessage" class="notice error hidden"></div>
+    <button class="primary full" id="loginBtn">Sign In</button>
+  </div>
+
+  <div id="app" class="hidden">
+    <div class="controls">
+      <input id="searchInput" type="search" placeholder="Search guest name…" autocomplete="off">
+      <div class="toolbar">
+        <label class="button secondary" style="margin:0;cursor:pointer">Import Excel / CSV<input id="fileInput" type="file" accept=".xlsx,.xls,.csv" style="display:none"></label>
+        <button class="secondary" id="walkinBtn">+ Walk-in</button>
+        <button class="secondary" id="toggleRsvpBtn">Close RSVP</button>
+      </div>
+      <div id="appMessage" class="notice hidden"></div>
+    </div>
+    <div class="status"><span id="guestCount">0 RSVPs</span><span id="checkedCount">0 checked in</span></div>
+    <div class="list" id="guestList"><div class="empty">Loading guest list…</div></div>
+    <div class="actions"><button class="secondary" id="refreshBtn">Refresh</button><button class="secondary" id="signOutBtn">Sign Out</button></div>
+  </div>
+</section></main>
+<footer>Developed by <strong>Moonlight</strong></footer>
+<script src="config.js"></script>
+<script type="module">
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.105.0';
+const cfg=window.VILLAGE_CONFIG; const db=createClient(cfg.supabaseUrl,cfg.supabaseKey);
+const params=new URLSearchParams(location.search); const slug=params.get('event')||cfg.defaultEventSlug;
+const $=id=>document.getElementById(id);
+let currentUser=null,eventRow=null,rsvps=[],checkins=[],searchTerm='',refreshTimer=null,busy=false;
+const norm=s=>String(s??'').trim().replace(/\s+/g,' ').toLowerCase();
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
+function note(text,type=''){const e=$('appMessage');e.textContent=text;e.className='notice'+(type?' '+type:'');if(!text)e.classList.add('hidden')}
+function loginNote(text){$('loginMessage').textContent=text;$('loginMessage').classList.toggle('hidden',!text)}
+function sourceLabel(s){return s==='public'?'RSVP':s==='import'?'Imported':'Staff'}
+function formatTime(v){try{return new Intl.DateTimeFormat('en',{hour:'numeric',minute:'2-digit'}).format(new Date(v))}catch{return ''}}
+
+async function showApp(session){
+  currentUser=session.user;$('loginBox').classList.add('hidden');$('app').classList.remove('hidden');
+  const {data,error}=await db.from('events').select('id,company_id,title,venue,rsvp_open').eq('slug',slug).maybeSingle();
+  if(error||!data){note('This account does not have access to this Village event.','error');return}
+  eventRow=data;$('doorSub').textContent=`${data.title}${data.venue?' · '+data.venue:''}`;updateMeta();await loadAll();
+  clearInterval(refreshTimer);refreshTimer=setInterval(()=>{if(!busy)loadAll(true)},8000);
+}
+function updateMeta(){ if(!eventRow)return; $('doorMeta').innerHTML=`<span class="pill ${eventRow.rsvp_open?'open':'closed'}">RSVP ${eventRow.rsvp_open?'Open':'Closed'}</span><span class="pill">Live door list</span>`;$('toggleRsvpBtn').textContent=eventRow.rsvp_open?'Close RSVP':'Open RSVP'; }
+async function loadAll(silent=false){
+  if(!eventRow)return;busy=true;
+  const [a,b]=await Promise.all([
+    db.from('event_rsvps').select('id,full_name,email,phone,party_size,status,source,created_at').eq('event_id',eventRow.id).neq('status','cancelled').order('full_name'),
+    db.from('event_checkins').select('id,rsvp_id,guest_name,party_size,checked_in_at').eq('event_id',eventRow.id).order('checked_in_at',{ascending:false})
+  ]);
+  busy=false;if(a.error||b.error){if(!silent)note('Could not load the guest list.','error');return}
+  rsvps=a.data||[];checkins=b.data||[];render();
+}
+function render(){
+  const checkedByRsvp=new Map(checkins.filter(x=>x.rsvp_id).map(x=>[x.rsvp_id,x]));
+  const filtered=rsvps.filter(g=>norm(g.full_name).includes(norm(searchTerm)));
+  $('guestCount').textContent=`${rsvps.length} RSVP${rsvps.length===1?'':'s'}`;$('checkedCount').textContent=`${checkins.length} checked in`;
+  const list=$('guestList');list.innerHTML='';
+  if(!rsvps.length){list.innerHTML='<div class="empty">No RSVPs yet. Share the public RSVP link or import a guest list.</div>';return}
+  if(!filtered.length){list.innerHTML='<div class="empty">No guest found.</div>';return}
+  filtered.forEach(g=>{
+    const ci=checkedByRsvp.get(g.id);const row=document.createElement('div');row.className='guest'+(ci?' done':'');
+    row.innerHTML=`<div class="check">${ci?'✓':''}</div><div class="guest-main"><div class="name"></div><div class="meta"><span class="source">${sourceLabel(g.source)}</span>${g.party_size>1?`<span>${g.party_size} people</span>`:''}${ci?`<span>Arrived ${esc(formatTime(ci.checked_in_at))}</span>`:''}</div></div>`;
+    row.querySelector('.name').textContent=g.full_name;
+    row.addEventListener('click',()=>toggleCheckin(g,ci));list.appendChild(row);
+  });
+}
+async function toggleCheckin(g,ci){
+  if(busy)return;busy=true;
+  if(ci){if(!confirm(`Undo check-in for ${g.full_name}?`)){busy=false;return}const {error}=await db.from('event_checkins').delete().eq('id',ci.id);if(error)note(error.message,'error');}
+  else{const {error}=await db.from('event_checkins').insert({event_id:eventRow.id,rsvp_id:g.id,guest_name:g.full_name,party_size:g.party_size||1,checked_in_by:currentUser.id});if(error&&error.code!=='23505')note(error.message,'error');}
+  busy=false;await loadAll(true);
+}
+function extractNames(rows){if(!rows?.length)return[];const headers=rows[0].map(v=>norm(v));let i=headers.findIndex(h=>['name','guest','guest name','full name','fullname'].includes(h));let start=1;if(i<0){i=rows[0].findIndex(v=>String(v??'').trim());start=0}if(i<0)return[];return rows.slice(start).map(r=>String(r[i]??'').trim()).filter(Boolean)}
+$('fileInput').addEventListener('change',async e=>{
+  const file=e.target.files?.[0];if(!file||!eventRow)return;
+  try{const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{header:1,defval:''});let names=[...new Map(extractNames(rows).map(n=>[norm(n),n])).values()];const existing=new Set(rsvps.map(x=>norm(x.full_name)));names=names.filter(n=>!existing.has(norm(n)));if(!names.length){note('No new names to import.','ok');return}const payload=names.map(full_name=>({event_id:eventRow.id,full_name,party_size:1,status:'confirmed',source:'import'}));const {error}=await db.from('event_rsvps').insert(payload);if(error)throw error;note(`${names.length} guest${names.length===1?'':'s'} imported.`,'ok');await loadAll(true);}catch(err){console.error(err);note('That file could not be imported. Use .xlsx, .xls, or .csv.','error')}finally{e.target.value=''}
+});
+$('walkinBtn').addEventListener('click',async()=>{if(!eventRow||busy)return;const full_name=prompt('Walk-in guest name:')?.trim();if(!full_name)return;busy=true;const {data,error}=await db.from('event_rsvps').insert({event_id:eventRow.id,full_name,party_size:1,status:'confirmed',source:'staff'}).select('id,full_name,party_size').single();if(error){busy=false;note(error.message,'error');return}const {error:ciErr}=await db.from('event_checkins').insert({event_id:eventRow.id,rsvp_id:data.id,guest_name:data.full_name,party_size:1,checked_in_by:currentUser.id});busy=false;if(ciErr)note(ciErr.message,'error');else note(`${full_name} added and checked in.`,'ok');await loadAll(true)});
+$('toggleRsvpBtn').addEventListener('click',async()=>{if(!eventRow)return;const next=!eventRow.rsvp_open;const {error}=await db.from('events').update({rsvp_open:next,updated_at:new Date().toISOString()}).eq('id',eventRow.id);if(error){note('Only a Village admin can change RSVP status.','error');return}eventRow.rsvp_open=next;updateMeta();note(`Public RSVP is now ${next?'open':'closed'}.`,'ok')});
+$('searchInput').addEventListener('input',e=>{searchTerm=e.target.value;render()});$('refreshBtn').addEventListener('click',()=>loadAll());$('signOutBtn').addEventListener('click',async()=>{clearInterval(refreshTimer);await db.auth.signOut();location.reload()});
+$('loginBtn').addEventListener('click',async()=>{const email=$('loginEmail').value.trim(),password=$('loginPassword').value;loginNote('');$('loginBtn').disabled=true;const {data,error}=await db.auth.signInWithPassword({email,password});$('loginBtn').disabled=false;if(error){loginNote('Sign-in failed. Check your email and password.');return}await showApp(data.session)});
+$('loginPassword').addEventListener('keydown',e=>{if(e.key==='Enter')$('loginBtn').click()});
+const {data:{session}}=await db.auth.getSession();if(session)await showApp(session);
+</script>
+</body></html>
