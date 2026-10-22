@@ -15,14 +15,16 @@
     <div><label>Email</label><input id="loginEmail" type="email" autocomplete="username" placeholder="Email"></div>
     <div><label>Password</label><input id="loginPassword" type="password" autocomplete="current-password" placeholder="Password"></div>
     <div id="loginMessage" class="notice error hidden"></div>
-    <button class="primary full" id="loginBtn">Sign In</button>
+    <button class="primary full" id="loginBtn">Sign In with Password</button>
+    <div class="tiny" style="text-align:center">— or —</div>
+    <button class="secondary full" id="magicBtn">Email me a login link</button>
   </div>
 
   <div id="app" class="hidden">
     <div class="controls">
       <input id="searchInput" type="search" placeholder="Search guest name…" autocomplete="off">
       <div class="toolbar">
-        <label class="button secondary" style="margin:0;cursor:pointer">Import Excel / CSV<input id="fileInput" type="file" accept=".xlsx,.xls,.csv" style="display:none"></label>
+        <label id="importLabel" class="button secondary" style="margin:0;cursor:pointer">Import Excel / CSV<input id="fileInput" type="file" accept=".xlsx,.xls,.csv" style="display:none"></label>
         <button class="secondary" id="walkinBtn">+ Walk-in</button>
         <button class="secondary" id="toggleRsvpBtn">Close RSVP</button>
       </div>
@@ -40,7 +42,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.105.0';
 const cfg=window.VILLAGE_CONFIG; const db=createClient(cfg.supabaseUrl,cfg.supabaseKey);
 const params=new URLSearchParams(location.search); const slug=params.get('event')||cfg.defaultEventSlug;
 const $=id=>document.getElementById(id);
-let currentUser=null,eventRow=null,rsvps=[],checkins=[],searchTerm='',refreshTimer=null,busy=false;
+let currentUser=null,eventRow=null,currentRole=null,rsvps=[],checkins=[],searchTerm='',refreshTimer=null,busy=false;
 const norm=s=>String(s??'').trim().replace(/\s+/g,' ').toLowerCase();
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]));
 function note(text,type=''){const e=$('appMessage');e.textContent=text;e.className='notice'+(type?' '+type:'');if(!text)e.classList.add('hidden')}
@@ -52,10 +54,15 @@ async function showApp(session){
   currentUser=session.user;$('loginBox').classList.add('hidden');$('app').classList.remove('hidden');
   const {data,error}=await db.from('events').select('id,company_id,title,venue,rsvp_open').eq('slug',slug).maybeSingle();
   if(error||!data){note('This account does not have access to this Village event.','error');return}
-  eventRow=data;$('doorSub').textContent=`${data.title}${data.venue?' · '+data.venue:''}`;updateMeta();await loadAll();
+  eventRow=data;
+  const {data:membership}=await db.from('company_memberships').select('role').eq('company_id',data.company_id).eq('user_id',currentUser.id).eq('active',true).maybeSingle();
+  currentRole=membership?.role||null;
+  $('doorSub').textContent=`${data.title}${data.venue?' · '+data.venue:''}`;
+  applyRoleUi();updateMeta();await loadAll();
   clearInterval(refreshTimer);refreshTimer=setInterval(()=>{if(!busy)loadAll(true)},8000);
 }
-function updateMeta(){ if(!eventRow)return; $('doorMeta').innerHTML=`<span class="pill ${eventRow.rsvp_open?'open':'closed'}">RSVP ${eventRow.rsvp_open?'Open':'Closed'}</span><span class="pill">Live door list</span>`;$('toggleRsvpBtn').textContent=eventRow.rsvp_open?'Close RSVP':'Open RSVP'; }
+function applyRoleUi(){ const isAdmin=['owner','admin'].includes(currentRole); $('toggleRsvpBtn').classList.toggle('hidden',!isAdmin); $('importLabel').classList.toggle('hidden',!isAdmin); }
+function updateMeta(){ if(!eventRow)return; const roleLabel=currentRole==='owner'?'Owner':currentRole==='admin'?'Admin':'Hostess'; $('doorMeta').innerHTML=`<span class="pill ${eventRow.rsvp_open?'open':'closed'}">RSVP ${eventRow.rsvp_open?'Open':'Closed'}</span><span class="pill">${roleLabel}</span><span class="pill">Live door list</span>`;$('toggleRsvpBtn').textContent=eventRow.rsvp_open?'Close RSVP':'Open RSVP'; }
 async function loadAll(silent=false){
   if(!eventRow)return;busy=true;
   const [a,b]=await Promise.all([
@@ -93,7 +100,8 @@ $('fileInput').addEventListener('change',async e=>{
 $('walkinBtn').addEventListener('click',async()=>{if(!eventRow||busy)return;const full_name=prompt('Walk-in guest name:')?.trim();if(!full_name)return;busy=true;const {data,error}=await db.from('event_rsvps').insert({event_id:eventRow.id,full_name,party_size:1,status:'confirmed',source:'staff'}).select('id,full_name,party_size').single();if(error){busy=false;note(error.message,'error');return}const {error:ciErr}=await db.from('event_checkins').insert({event_id:eventRow.id,rsvp_id:data.id,guest_name:data.full_name,party_size:1,checked_in_by:currentUser.id});busy=false;if(ciErr)note(ciErr.message,'error');else note(`${full_name} added and checked in.`,'ok');await loadAll(true)});
 $('toggleRsvpBtn').addEventListener('click',async()=>{if(!eventRow)return;const next=!eventRow.rsvp_open;const {error}=await db.from('events').update({rsvp_open:next,updated_at:new Date().toISOString()}).eq('id',eventRow.id);if(error){note('Only a Village admin can change RSVP status.','error');return}eventRow.rsvp_open=next;updateMeta();note(`Public RSVP is now ${next?'open':'closed'}.`,'ok')});
 $('searchInput').addEventListener('input',e=>{searchTerm=e.target.value;render()});$('refreshBtn').addEventListener('click',()=>loadAll());$('signOutBtn').addEventListener('click',async()=>{clearInterval(refreshTimer);await db.auth.signOut();location.reload()});
-$('loginBtn').addEventListener('click',async()=>{const email=$('loginEmail').value.trim(),password=$('loginPassword').value;loginNote('');$('loginBtn').disabled=true;const {data,error}=await db.auth.signInWithPassword({email,password});$('loginBtn').disabled=false;if(error){loginNote('Sign-in failed. Check your email and password.');return}await showApp(data.session)});
+$('loginBtn').addEventListener('click',async()=>{const email=$('loginEmail').value.trim(),password=$('loginPassword').value;loginNote('');if(!email||!password){loginNote('Enter your email and password.');return}$('loginBtn').disabled=true;const {data,error}=await db.auth.signInWithPassword({email,password});$('loginBtn').disabled=false;if(error){loginNote('Sign-in failed. Check your email and password.');return}await showApp(data.session)});
+$('magicBtn').addEventListener('click',async()=>{const email=$('loginEmail').value.trim();loginNote('');if(!email){loginNote('Enter your staff email first.');return}const b=$('magicBtn');b.disabled=true;b.textContent='Sending…';const redirectTo=`${location.origin}/door`;const {error}=await db.auth.signInWithOtp({email,options:{shouldCreateUser:false,emailRedirectTo:redirectTo}});b.disabled=false;b.textContent='Email me a login link';if(error){loginNote(error.message||'Could not send the login link.');return}const box=$('loginMessage');box.textContent='Login link sent. Check your email and tap the link to open the door app.';box.className='notice ok';});
 $('loginPassword').addEventListener('keydown',e=>{if(e.key==='Enter')$('loginBtn').click()});
 const {data:{session}}=await db.auth.getSession();if(session)await showApp(session);
 </script>
